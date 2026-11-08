@@ -1,0 +1,96 @@
+# MS1 · Tenants y Usuarios (P1). DynamoDB. Dueño del Lambda Authorizer que usan los 5 MS.
+service: crm-ms1-usuarios
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 10
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    TABLA_TENANTS: ${self:custom.prefijo}-tenants
+    TABLA_USUARIOS: ${self:custom.prefijo}-usuarios
+    TABLA_TOKENS: ${self:custom.prefijo}-tokens
+    TOPICO_EVENTOS: ${cf:crm-compartido-${sls:stage}.TopicoEventosArn}
+  httpApi:
+    cors: true
+    authorizers:
+      tokenCrm:
+        type: request
+        functionName: autorizador
+        identitySource: $request.header.Authorization
+        enableSimpleResponses: true
+        payloadVersion: '2.0'
+        resultTtlInSeconds: 300
+
+custom:
+  prefijo: crm-ms1-${sls:stage}
+
+package:
+  patterns:
+    - '!tests/**'
+    - '!**/__pycache__/**'
+
+functions:
+  api:
+    handler: src/handler.main
+    events:
+      # Públicas
+      - httpApi: { method: GET, path: /ms1/health }
+      - httpApi: { method: POST, path: /ms1/tenants }
+      - httpApi: { method: POST, path: /ms1/login }
+      # Protegidas
+      - httpApi: { method: GET, path: /ms1/me, authorizer: { name: tokenCrm } }
+      - httpApi: { method: GET, path: /ms1/usuarios, authorizer: { name: tokenCrm } }
+      - httpApi: { method: POST, path: /ms1/usuarios, authorizer: { name: tokenCrm } }
+      - httpApi: { method: POST, path: '/ms1/usuarios/{email}/suspender', authorizer: { name: tokenCrm } }
+
+  autorizador:
+    handler: src/autorizador.main
+    memorySize: 128
+
+resources:
+  Resources:
+    TablaTenants:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.prefijo}-tenants
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: tenant_id, AttributeType: S }
+        KeySchema:
+          - { AttributeName: tenant_id, KeyType: HASH }
+
+    TablaUsuarios:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.prefijo}-usuarios
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: tenant_id, AttributeType: S }
+          - { AttributeName: email, AttributeType: S }
+        KeySchema:
+          - { AttributeName: tenant_id, KeyType: HASH }
+          - { AttributeName: email, KeyType: RANGE }
+
+    TablaTokens:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.prefijo}-tokens
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: token, AttributeType: S }
+        KeySchema:
+          - { AttributeName: token, KeyType: HASH }
+        TimeToLiveSpecification:
+          AttributeName: expira
+          Enabled: true
+
+  Outputs:
+    # Los otros 4 MS lo leen con ${cf:crm-ms1-usuarios-<stage>.AutorizadorArn}
+    AutorizadorArn:
+      Value: { Fn::GetAtt: [AutorizadorLambdaFunction, Arn] }
